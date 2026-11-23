@@ -6,15 +6,14 @@
 #
 # Em produção, fixe a imagem base por digest (node:24-alpine@sha256:...) para
 # builds reprodutíveis. O Renovate/Dependabot atualiza o digest.
-ARG NODE_IMAGE=node:24-alpine
 
-FROM ${NODE_IMAGE} AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-FROM ${NODE_IMAGE} AS test
+FROM node:24-alpine AS test
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --no-fund
@@ -22,7 +21,7 @@ COPY src ./src
 COPY test ./test
 RUN npm test
 
-FROM ${NODE_IMAGE} AS runtime
+FROM node:24-alpine AS runtime
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="pedidos-veloz-payments" \
