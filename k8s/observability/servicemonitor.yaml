@@ -1,0 +1,17 @@
+# CRD do Prometheus Operator (instalado pelo kube-prometheus-stack).
+# Coleta /metrics de todos os Services da aplicação.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pedidos-veloz
+  labels:
+    release: kube-prometheus-stack   # seletor padrão do chart
+spec:
+  namespaceSelector:
+    matchNames: [pedidos-veloz]
+  selector:
+    matchLabels: { app.kubernetes.io/part-of: pedidos-veloz }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

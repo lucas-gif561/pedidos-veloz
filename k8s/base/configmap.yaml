@@ -1,0 +1,18 @@
+# Configuração não sensível, compartilhada (12-Factor III: config no ambiente).
+# Senhas NÃO ficam aqui: ficam no Secret `pedidos-veloz-db`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  LOG_LEVEL: info
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc:4318
+  # Tempo para o pod sair dos Endpoints antes de parar de aceitar conexões.
+  SHUTDOWN_DELAY_MS: "5000"
+  PGHOST: postgres
+  PGSSLMODE: disable
+  ORDERS_URL: http://orders
+  INVENTORY_URL: http://inventory
+  PAYMENTS_URL: http://payments
+  PAYMENT_LATENCY_MS: "150"
+  PAYMENT_FAILURE_RATE: "0.05"

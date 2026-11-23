@@ -1,0 +1,38 @@
+# Ambiente local (kind / minikube / Docker Desktop):
+#   - imagens construídas localmente (tag dev), carregadas no cluster com `kind load`
+#   - Postgres dentro do cluster
+#   - senhas de DEV geradas aqui (o sufixo de hash força rollout quando mudam)
+#   - mínimo de 1 réplica para caber em um notebook
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pedidos-veloz
+
+resources:
+  - ../../base
+  - postgres.yaml
+
+images:
+  - { name: pedidos-veloz/gateway, newTag: dev }
+  - { name: pedidos-veloz/orders, newTag: dev }
+  - { name: pedidos-veloz/inventory, newTag: dev }
+  - { name: pedidos-veloz/payments, newTag: dev }
+
+secretGenerator:
+  - name: pedidos-veloz-db
+    literals:
+      - admin-password=postgres_dev
+      - orders-password=orders_dev
+      - inventory-password=inventory_dev
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=debug
+
+patches:
+  - target: { kind: HorizontalPodAutoscaler }
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 1

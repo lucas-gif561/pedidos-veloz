@@ -1,0 +1,95 @@
+# PostgreSQL dentro do cluster, APENAS para o ambiente local (kind/minikube).
+# Em produção, o banco é gerenciado (Amazon RDS, criado pelo Terraform):
+# backup, failover e patches ficam com o provedor, não com o time.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+data:
+  01-create-databases.sh: |
+    #!/bin/sh
+    set -eu
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
+      -v orders_pw="$ORDERS_DB_PASSWORD" -v inventory_pw="$INVENTORY_DB_PASSWORD" <<-'EOSQL'
+      CREATE ROLE orders LOGIN PASSWORD :'orders_pw';
+      CREATE DATABASE orders OWNER orders;
+      REVOKE ALL ON DATABASE orders FROM PUBLIC;
+      CREATE ROLE inventory LOGIN PASSWORD :'inventory_pw';
+      CREATE DATABASE inventory OWNER inventory;
+      REVOKE ALL ON DATABASE inventory FROM PUBLIC;
+    EOSQL
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels: { app.kubernetes.io/name: postgres, app.kubernetes.io/component: database }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres, app.kubernetes.io/component: database }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70          # usuário "postgres" da imagem alpine
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          env:
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - { name: POSTGRES_USER, value: postgres }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: pedidos-veloz-db, key: admin-password } }
+            - name: ORDERS_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: pedidos-veloz-db, key: orders-password } }
+            - name: INVENTORY_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: pedidos-veloz-db, key: inventory-password } }
+          readinessProbe:
+            exec: { command: [pg_isready, -U, postgres] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: [pg_isready, -U, postgres] }
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+        - name: init
+          configMap: { name: postgres-init, defaultMode: 0555 }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels: { app.kubernetes.io/name: postgres }
+spec:
+  selector: { app.kubernetes.io/name: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }

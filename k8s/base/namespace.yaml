@@ -1,0 +1,14 @@
+# Pod Security Admission no nível "restricted": o API server REJEITA pods que
+# rodem como root, permitam escalonamento de privilégio, não derrubem
+# capabilities ou não usem seccomp. Segurança aplicada pela plataforma, não
+# dependente de cada time lembrar.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pedidos-veloz
+  labels:
+    app.kubernetes.io/part-of: pedidos-veloz
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

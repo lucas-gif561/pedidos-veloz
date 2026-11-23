@@ -1,0 +1,241 @@
+# Pipeline da Pedidos Veloz
+#
+#   PR / push main:  lint -> testes -> teste de integração (compose) -> build + scan
+#   push main:       ... + publica imagens no GHCR (tags sha-xxxxxxx e main)
+#   tag vX.Y.Z:      ... + publica X.Y.Z -> deploy em produção (aprovação manual)
+#
+# Segurança do pipeline:
+#   - permissões mínimas por job (GITHUB_TOKEN só escreve pacotes no job de build)
+#   - segredos de produção ficam no GitHub Environment "production", que exige
+#     aprovação e só é visível para o job de deploy
+#   - recomendação: fixar as actions por SHA de commit. Tags podem ser
+#     reescritas (ex.: incidente tj-actions/changed-files, 2025)
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: "24"
+  SERVICES: gateway orders inventory payments
+
+jobs:
+  # ---------------------------------------------------------------- validação
+  lint:
+    name: Lint e validações estáticas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: Libs compartilhadas sincronizadas
+        run: node scripts/sync-shared.mjs --check
+      - name: Hadolint (Dockerfiles)
+        run: |
+          for s in $SERVICES; do
+            echo "::group::$s"; docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold warning - < services/$s/Dockerfile; echo "::endgroup::"
+          done
+      - name: Kubeconform (manifests renderizados pelo Kustomize)
+        run: |
+          for dir in k8s/overlays/local k8s/overlays/production k8s/observability; do
+            echo "::group::$dir"
+            kubectl kustomize "$dir" | docker run --rm -i ghcr.io/yannh/kubeconform:v0.6.7 \
+              -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 -
+            echo "::endgroup::"
+          done
+      - name: Docker Compose válido
+        run: docker compose config --quiet
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform fmt + validate
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  test:
+    name: Testes (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, orders, inventory, payments]
+    defaults:
+      run: { working-directory: "services/${{ matrix.service }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "${{ env.NODE_VERSION }}"
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  integration:
+    name: Integração (docker compose + smoke test)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sobe o ambiente completo
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Smoke test ponta a ponta
+        run: node scripts/smoke-test.mjs
+      - name: Logs em caso de falha
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - if: always()
+        run: docker compose down --volumes
+
+  # -------------------------------------------------------- build e publicação
+  build:
+    name: Imagem (${{ matrix.service }})
+    needs: [integration]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # publicar no GHCR com o GITHUB_TOKEN (sem senha própria)
+    strategy:
+      matrix:
+        service: [gateway, orders, inventory, payments]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Tags da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pedidos-veloz-${{ matrix.service }}
+          # Versionamento: X.Y.Z e X.Y em releases; sha-<commit> sempre (imutável e rastreável).
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=ref,event=branch
+
+      - name: Build (carrega localmente para o scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          load: true
+          tags: scan/${{ matrix.service }}:ci
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan de vulnerabilidades (Trivy)
+        # Falha o build com CVE CRITICAL que já tenha correção disponível.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress scan/${{ matrix.service }}:ci
+
+      - name: Login no GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publica
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          provenance: true
+          sbom: true
+
+  # ------------------------------------------------------------------- deploy
+  deploy:
+    name: Deploy em produção
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: production          # configure "Required reviewers" no GitHub: gate manual
+      url: https://api.lojaveloz.com.br
+    env:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifica acesso ao cluster
+        id: cluster
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::warning::Secret KUBE_CONFIG não configurado: deploy pulado (imagens já publicadas)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mkdir -p ~/.kube && echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config && chmod 600 ~/.kube/config
+          kubectl version
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Secrets e CA do banco (fora do Git)
+        if: steps.cluster.outputs.enabled == 'true'
+        env:
+          ORDERS_DB_PASSWORD: ${{ secrets.ORDERS_DB_PASSWORD }}
+          INVENTORY_DB_PASSWORD: ${{ secrets.INVENTORY_DB_PASSWORD }}
+        run: |
+          kubectl apply -f k8s/base/namespace.yaml
+          kubectl -n pedidos-veloz create secret generic pedidos-veloz-db \
+            --from-literal=orders-password="$ORDERS_DB_PASSWORD" \
+            --from-literal=inventory-password="$INVENTORY_DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o global-bundle.pem
+          kubectl -n pedidos-veloz create configmap rds-ca --from-file=global-bundle.pem \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Aplica a versão ${{ github.ref_name }}
+        if: steps.cluster.outputs.enabled == 'true'
+        working-directory: k8s/overlays/production
+        env:
+          DB_HOST: ${{ vars.DB_HOST }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          for s in $SERVICES; do
+            kustomize edit set image "pedidos-veloz/$s=ghcr.io/$OWNER/pedidos-veloz-$s:$VERSION"
+          done
+          sed -i "s/RDS_ENDPOINT/$DB_HOST/" kustomization.yaml
+          kubectl apply -k .
+
+      - name: Aguarda o rolling update (rollback automático se falhar)
+        if: steps.cluster.outputs.enabled == 'true'
+        run: |
+          for s in $SERVICES; do
+            if ! kubectl -n pedidos-veloz rollout status deployment/$s --timeout=180s; then
+              echo "::error::Rollout de $s falhou: revertendo todos os serviços"
+              for r in $SERVICES; do kubectl -n pedidos-veloz rollout undo deployment/$r || true; done
+              exit 1
+            fi
+          done
+
+      - name: Smoke test em produção
+        if: steps.cluster.outputs.enabled == 'true'
+        run: BASE_URL=https://api.lojaveloz.com.br node scripts/smoke-test.mjs --read-only

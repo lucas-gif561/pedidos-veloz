@@ -1,0 +1,26 @@
+{
+  "name": "@pedidos-veloz/inventory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pedidos Veloz - serviço inventory",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.301.2",
+    "@opentelemetry/instrumentation-express": "0.73.0",
+    "@opentelemetry/instrumentation-http": "0.301.2",
+    "@opentelemetry/instrumentation-pg": "0.78.0",
+    "@opentelemetry/sdk-node": "0.301.2",
+    "express": "5.3.0",
+    "pg": "8.23.1",
+    "pino": "10.4.0",
+    "prom-client": "15.1.3"
+  }
+}

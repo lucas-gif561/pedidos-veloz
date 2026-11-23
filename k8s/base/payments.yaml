@@ -1,0 +1,115 @@
+# Serviço payments: mesmo padrão de orders.yaml (ver comentários lá), sem banco de dados.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  labels: { app.kubernetes.io/name: payments, app.kubernetes.io/component: backend }
+spec:
+  # Sem `replicas`: quem decide é o HPA (evita brigar com ele a cada apply).
+  revisionHistoryLimit: 5            # permite `kubectl rollout undo`
+  selector:
+    matchLabels: { app.kubernetes.io/name: payments }
+  # Rolling update sem perda de capacidade: sobe 1 pod novo, espera ficar
+  # Ready (readinessProbe) e só então derruba 1 antigo.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  minReadySeconds: 5
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: payments, app.kubernetes.io/component: backend }
+    spec:
+      automountServiceAccountToken: false   # o app não fala com a API do Kubernetes
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      # Espalha as réplicas entre nós: a queda de um nó não derruba o serviço.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: payments }
+      containers:
+        - name: payments
+          image: pedidos-veloz/payments   # tag definida pelo overlay (kustomize images)
+          ports:
+            - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: app-config }
+          env:
+            - { name: OTEL_SERVICE_NAME, value: payments }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }   # base para o HPA calcular % de CPU
+            limits: { cpu: 500m, memory: 256Mi }
+          startupProbe:
+            httpGet: { path: /healthz/live, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # readiness: pronto quando o processo sobe (serviço sem estado).
+          readinessProbe:
+            httpGet: { path: /healthz/ready, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          # liveness: só reinicia se o processo travou (não depende do banco).
+          livenessProbe:
+            httpGet: { path: /healthz/live, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments
+  labels: { app.kubernetes.io/name: payments }
+spec:
+  selector: { app.kubernetes.io/name: payments }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Escala horizontal pela CPU. Sobe rápido (pico da campanha) e desce devagar
+# (evita "flapping" quando o tráfego oscila).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payments
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: payments }
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 30 }
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }
+---
+# Durante manutenção de nós (drain), mantém ao menos 1 pod no ar.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: payments }

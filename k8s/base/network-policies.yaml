@@ -1,0 +1,94 @@
+# Zero trust na rede: tudo bloqueado por padrão, e cada fluxo liberado
+# explicitamente. Se um serviço for comprometido, ele não alcança o banco de
+# outro serviço. (Exige um CNI com suporte a NetworkPolicy: Calico, Cilium, VPC CNI...)
+#
+#   internet -> gateway -> orders -> inventory / payments
+#                     \-> inventory
+#   orders, inventory -> postgres
+#   Prometheus (namespace monitoring) -> :8080/metrics em todos
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-from-anywhere
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 8080 }]   # ponto de entrada público (via Gateway API / Ingress)
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-from-gateway
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: orders }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inventory-from-gateway-and-orders
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: inventory }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: orders } }
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payments-from-orders
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: payments }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: orders } }
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-from-data-owners
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: orders } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: inventory } }
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-from-monitoring
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/part-of: pedidos-veloz }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports: [{ port: 8080 }]

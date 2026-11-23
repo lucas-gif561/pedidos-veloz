@@ -1,0 +1,18 @@
+# Stack de tracing no cluster: OpenTelemetry Collector + Jaeger.
+# Métricas: Prometheus/Grafana via kube-prometheus-stack (Helm, namespace
+# "monitoring"). O ServiceMonitor abaixo diz ao Prometheus o que coletar.
+#
+#   kubectl apply -k k8s/observability
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: observability
+
+resources:
+  - namespace.yaml
+  - otel-collector.yaml
+  - jaeger.yaml
+  - servicemonitor.yaml
+
+configMapGenerator:
+  - name: otel-collector-config
+    files: [config.yaml=otel-collector-config.yaml]

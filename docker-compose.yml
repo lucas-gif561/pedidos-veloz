@@ -1,0 +1,154 @@
+# Ambiente local completo da Pedidos Veloz: um comando sobe tudo.
+#
+#   docker compose up --build
+#
+# API:        http://localhost:8080
+# Jaeger:     http://localhost:16686   (traces)
+# Prometheus: http://localhost:9090    (métricas)
+# Grafana:    http://localhost:3000    (dashboards; login anônimo como viewer)
+#
+# Senhas: valores de DEV com default abaixo. Para trocar, copie .env.example
+# para .env. Em produção, as senhas vêm de Secrets (Kubernetes / GitHub).
+
+name: pedidos-veloz
+
+x-app: &app
+  restart: unless-stopped
+  read_only: true                    # sistema de arquivos imutável
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  networks: [backend]
+
+x-app-env: &app-env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+
+services:
+  # ---------- Dados ----------
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev}
+      ORDERS_DB_PASSWORD: ${ORDERS_DB_PASSWORD:-orders_dev}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:-inventory_dev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:5432:5432"]   # só para inspeção local (psql); nunca exposto externamente
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [data]
+
+  # ---------- Microsserviços ----------
+  inventory:
+    <<: *app
+    build: { context: ./services/inventory, args: { VERSION: "${TAG:-dev}" } }
+    image: ${REGISTRY:-pedidos-veloz}/inventory:${TAG:-dev}
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: inventory
+      PGHOST: postgres
+      PGDATABASE: inventory
+      PGUSER: inventory
+      PGPASSWORD: ${INVENTORY_DB_PASSWORD:-inventory_dev}
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend, data]
+
+  payments:
+    <<: *app
+    build: { context: ./services/payments, args: { VERSION: "${TAG:-dev}" } }
+    image: ${REGISTRY:-pedidos-veloz}/payments:${TAG:-dev}
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: payments
+      PAYMENT_LATENCY_MS: ${PAYMENT_LATENCY_MS:-150}
+      PAYMENT_FAILURE_RATE: ${PAYMENT_FAILURE_RATE:-0.05}
+
+  orders:
+    <<: *app
+    build: { context: ./services/orders, args: { VERSION: "${TAG:-dev}" } }
+    image: ${REGISTRY:-pedidos-veloz}/orders:${TAG:-dev}
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: orders
+      PGHOST: postgres
+      PGDATABASE: orders
+      PGUSER: orders
+      PGPASSWORD: ${ORDERS_DB_PASSWORD:-orders_dev}
+      INVENTORY_URL: http://inventory:8080
+      PAYMENTS_URL: http://payments:8080
+    depends_on:
+      postgres: { condition: service_healthy }
+      inventory: { condition: service_healthy }
+      payments: { condition: service_healthy }
+    networks: [backend, data]
+
+  gateway:
+    <<: *app
+    build: { context: ./services/gateway, args: { VERSION: "${TAG:-dev}" } }
+    image: ${REGISTRY:-pedidos-veloz}/gateway:${TAG:-dev}
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: gateway
+      ORDERS_URL: http://orders:8080
+      INVENTORY_URL: http://inventory:8080
+    ports: ["8080:8080"]            # único serviço de aplicação exposto
+    depends_on:
+      orders: { condition: service_healthy }
+      inventory: { condition: service_healthy }
+    networks: [edge, backend]
+
+  # ---------- Observabilidade ----------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    depends_on: [jaeger]
+    networks: [backend]
+
+  jaeger:
+    image: jaegertracing/jaeger:2.1.0
+    ports: ["16686:16686"]
+    networks: [backend]
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["9090:9090"]
+    networks: [backend]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin_dev}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    networks: [backend]
+
+# Segmentação: o banco fica numa rede interna (sem saída) alcançável só por
+# quem precisa dele (orders e inventory). Payments e gateway não enxergam o banco.
+networks:
+  edge: {}
+  backend: {}
+  data: { internal: true }
+
+volumes:
+  pgdata: {}

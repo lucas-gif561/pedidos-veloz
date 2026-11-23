@@ -1,0 +1,17 @@
+# Exposição pública pela Gateway API, que substitui o Ingress (o projeto
+# ingress-nginx foi descontinuado em 2026). O Gateway `public` é da plataforma
+# (AWS Load Balancer Controller, Envoy Gateway, Istio...), e aqui só declaramos
+# a rota da aplicação. O TLS termina no Gateway.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: pedidos-veloz
+spec:
+  parentRefs:
+    - { name: public, namespace: gateway-infra }
+  hostnames: [api.lojaveloz.com.br]
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /api }
+      backendRefs:
+        - { name: gateway, port: 80 }

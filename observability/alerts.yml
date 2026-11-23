@@ -1,0 +1,35 @@
+# Alertas baseados em sintomas que o cliente sente (golden signals), não em causas.
+groups:
+  - name: pedidos-veloz
+    rules:
+      - alert: ServicoFora
+        expr: up{job="pedidos-veloz"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} não responde ao scrape há 1 minuto"
+
+      - alert: TaxaDeErroAlta
+        expr: |
+          sum by (service) (rate(http_server_request_duration_seconds_count{status_code=~"5.."}[5m]))
+            / sum by (service) (rate(http_server_request_duration_seconds_count[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }} com mais de 5% de respostas 5xx"
+
+      - alert: LatenciaP95Alta
+        expr: |
+          histogram_quantile(0.95, sum by (le, service) (rate(http_server_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 de {{ $labels.service }} acima de 1s"
+
+      - alert: PedidosFalhando
+        expr: |
+          sum(rate(orders_total{status="FAILED"}[10m])) / sum(rate(orders_total[10m])) > 0.02
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Mais de 2% dos pedidos terminando em FAILED (dependência indisponível)"

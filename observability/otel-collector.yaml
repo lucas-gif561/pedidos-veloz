@@ -1,0 +1,28 @@
+# OpenTelemetry Collector: recebe traces OTLP dos serviços e exporta para o Jaeger.
+# Os serviços só conhecem o Collector, então trocar o Jaeger por Tempo, Datadog
+# ou outro backend é só mudar o exporter aqui, sem tocar no código.
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch:
+    timeout: 5s
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls: { insecure: true }
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]

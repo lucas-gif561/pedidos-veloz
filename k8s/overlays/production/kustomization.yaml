@@ -1,0 +1,49 @@
+# Produção (EKS criado pelo Terraform em infra/terraform):
+#   - imagens versionadas do GHCR; o pipeline de CD troca a tag com
+#     `kustomize edit set image` a cada release (vX.Y.Z)
+#   - banco gerenciado (RDS) com TLS verificado
+#   - o Secret `pedidos-veloz-db` NÃO está no Git: o pipeline o cria a partir dos
+#     GitHub Secrets do environment "production" (evolução: External Secrets
+#     Operator lendo do AWS Secrets Manager)
+#   - exposição pública via Gateway API (HTTPRoute)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pedidos-veloz
+
+resources:
+  - ../../base
+  - httproute.yaml
+
+images:
+  - { name: pedidos-veloz/gateway, newName: ghcr.io/OWNER/pedidos-veloz-gateway, newTag: 0.1.0 }
+  - { name: pedidos-veloz/orders, newName: ghcr.io/OWNER/pedidos-veloz-orders, newTag: 0.1.0 }
+  - { name: pedidos-veloz/inventory, newName: ghcr.io/OWNER/pedidos-veloz-inventory, newTag: 0.1.0 }
+  - { name: pedidos-veloz/payments, newName: ghcr.io/OWNER/pedidos-veloz-payments, newTag: 0.1.0 }
+
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      # Endpoint do RDS: saída `db_endpoint` do Terraform (o pipeline substitui).
+      - PGHOST=RDS_ENDPOINT
+      - PGSSLMODE=verify-full
+      - NODE_EXTRA_CA_CERTS=/etc/ssl/rds/global-bundle.pem
+      - PAYMENT_FAILURE_RATE=0.02
+
+patches:
+  # Monta o certificado CA do RDS nos serviços que acessam o banco.
+  # O ConfigMap `rds-ca` é criado pelo pipeline a partir do truststore da AWS.
+  - target: { kind: Deployment, name: "orders|inventory" }
+    patch: |
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value: { name: rds-ca, configMap: { name: rds-ca } }
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value: { name: rds-ca, mountPath: /etc/ssl/rds, readOnly: true }
+  # Pico da campanha: mais folga para o gateway e o serviço de pedidos.
+  - target: { kind: HorizontalPodAutoscaler, name: "gateway|orders" }
+    patch: |
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
