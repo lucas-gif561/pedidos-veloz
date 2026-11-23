@@ -4,7 +4,7 @@ Plataforma de pedidos da **Loja Veloz** em microsserviços, com ambiente local
 reproduzível, imagens seguras e versionadas, deploy em Kubernetes, pipeline de
 CI/CD, autoescala e observabilidade (métricas, logs e traces).
 
-> 🎥 **Vídeo pitch:** _[link do YouTube aqui]_
+> 🎥 **Vídeo pitch:** https://youtu.be/zmzmqXmTCmA
 
 ---
 
